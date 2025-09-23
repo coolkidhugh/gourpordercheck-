@@ -1,174 +1,210 @@
 import pandas as pd
 import streamlit as st
-import re
 
-def find_column(df, keywords):
-    """(全能版) 根据关键词在DataFrame中灵活查找列名"""
-    # 转换为小写进行匹配，以提高兼容性
-    normalized_columns = {col: str(col).lower().replace(' ', '') for col in df.columns}
+st.set_page_config(page_title="交互式名单比对平台", layout="wide")
+
+# --- 初始化 Session State ---
+# 使用Session State来存储上传的文件和用户的选择，避免每次操作都重置
+if 'df1' not in st.session_state:
+    st.session_state.df1 = None
+if 'df2' not in st.session_state:
+    st.session_state.df2 = None
+if 'df1_name' not in st.session_state:
+    st.session_state.df1_name = ""
+if 'df2_name' not in st.session_state:
+    st.session_state.df2_name = ""
+
+
+def process_and_standardize(df, mapping, room_type_equivalents=None):
+    """根据用户映射来处理和标准化DataFrame"""
+    # 筛选出用户选择的列
     
-    for keyword in keywords:
-        for original_col, normalized_col in normalized_columns.items():
-            if keyword in normalized_col:
-                return original_col
-    return None
+    # 检查必需的列是否已映射
+    if not all([mapping['name'], mapping['start_date'], mapping['end_date']]):
+        return None # 如果核心列没有映射，则不处理
 
-def clean_date(series):
-    """将日期列转换为仅包含年月日的datetime对象"""
-    return pd.to_datetime(series, errors='coerce').dt.date
+    # 从原始df中根据映射关系，提取并重命名列，构建新的df
+    standard_df = pd.DataFrame()
+    standard_df['name'] = df[mapping['name']].astype(str)
+    standard_df['start_date'] = pd.to_datetime(df[mapping['start_date']], errors='coerce').dt.date
+    standard_df['end_date'] = pd.to_datetime(df[mapping['end_date']], errors='coerce').dt.date
+    
+    # 可选列
+    if mapping['room_type']:
+        standard_df['room_type'] = df[mapping['room_type']].astype(str)
+        # 如果有房型映射关系，则进行转换
+        if room_type_equivalents:
+            # 创建一个反向映射，方便替换
+            reverse_map = {}
+            for key, values in room_type_equivalents.items():
+                for value in values:
+                    reverse_map[value] = key
+            standard_df['room_type'] = standard_df['room_type'].replace(reverse_map)
 
-def process_guest_list(df, name_col):
-    """处理可能包含多个姓名的列，将其拆分并展开为多行"""
-    if name_col not in df.columns:
-        return df
+    if mapping['price']:
+        standard_df['price'] = pd.to_numeric(df[mapping['price']], errors='coerce')
         
-    df[name_col] = df[name_col].astype(str).str.strip()
-    if df[name_col].str.contains('、|,', na=False).any():
-        df[name_col] = df[name_col].str.replace(',', '、')
-        df[name_col] = df[name_col].str.split('、')
-        df = df.explode(name_col)
-        df[name_col] = df[name_col].str.strip()
-    return df
-
-def compare_lists(df1, df2):
-    """
-    V6.0: 对两个文件都采用最灵活的列名识别方式。
-    """
-    # --- 1. 定义关键词词典 ---
-    name_keys = ['姓名', 'name']
-    start_date_keys = ['入住', 'checkin', '到达', 'arrival', '抵店']
-    end_date_keys = ['退房', 'checkout', '离开', 'departure', '离店']
-    room_type_keys = ['房型', '房类', '房间安排', 'roomtype', '房间']
-    price_keys = ['房价', '定价', 'price', 'rate']
-
-    # --- 2. 灵活识别文件1的列 ---
-    name_col1 = find_column(df1, name_keys)
-    start_date_col1 = find_column(df1, start_date_keys)
-    end_date_col1 = find_column(df1, end_date_keys)
-    room_type_col1 = find_column(df1, room_type_keys)
-    price_col1 = find_column(df1, price_keys)
-
-    # --- 3. 灵活识别文件2的列 ---
-    name_col2 = find_column(df2, name_keys)
-    start_date_col2 = find_column(df2, start_date_keys)
-    end_date_col2 = find_column(df2, end_date_keys)
-    room_type_col2 = find_column(df2, room_type_keys)
-    price_col2 = find_column(df2, price_keys)
-
-    # 检查核心列是否存在
-    if not all([name_col1, start_date_col1, end_date_col1]):
-        st.error("错误：无法在第一个文件中找到所有核心列（姓名、入住日期、退房日期）。")
-        return None
-    if not all([name_col2, start_date_col2, end_date_col2]):
-        st.error("错误：无法在第二个文件中找到所有核心列（姓名、到达日期、离开日期）。")
-        return None
-
-    # --- 4. 数据处理与准备 ---
-    df1_processed = process_guest_list(df1.copy(), name_col1)
-    df2_processed = process_guest_list(df2.copy(), name_col2)
+    # 清理姓名列（拆分同住人）
+    standard_df['name'] = standard_df['name'].str.replace('、', ',', regex=False).str.split(',')
+    standard_df = standard_df.explode('name')
+    standard_df['name'] = standard_df['name'].str.strip()
     
-    cols_to_use1 = {name_col1: 'name', start_date_col1: 'start_date', end_date_col1: 'end_date'}
-    if room_type_col1: cols_to_use1[room_type_col1] = 'room_type'
-    if price_col1: cols_to_use1[price_col1] = 'price'
-
-    cols_to_use2 = {name_col2: 'name', start_date_col2: 'start_date', end_date_col2: 'end_date'}
-    if room_type_col2: cols_to_use2[room_type_col2] = 'room_type'
-    if price_col2: cols_to_use2[price_col2] = 'price'
-
-    df1_final = df1_processed[list(cols_to_use1.keys())].rename(columns=cols_to_use1)
-    df2_final = df2_processed[list(cols_to_use2.keys())].rename(columns=cols_to_use2)
-
-    # 清理数据
-    for df in [df1_final, df2_final]:
-        df['name'] = df['name'].astype(str).str.strip()
-        df['start_date'] = clean_date(df['start_date'])
-        df['end_date'] = clean_date(df['end_date'])
-        df.dropna(subset=['name', 'start_date', 'end_date'], inplace=True)
-        # 清理姓名列，只保留中英文，避免匹配到'/'等无效字符
-        df['name'] = df['name'].apply(lambda x: ''.join(re.findall(r'[\u4e00-\u9fa5a-zA-Z]+', x)))
-        df.dropna(subset=['name'], inplace=True)
-        df = df[df['name'] != '']
+    # 删除无效行
+    standard_df.dropna(subset=['name', 'start_date', 'end_date'], inplace=True)
+    standard_df = standard_df[standard_df['name'] != '']
     
-    # --- 5. 执行最终比较 ---
-    merged_df = pd.merge(df1_final, df2_final, on='name', suffixes=('_file1', '_file2'), how='outer')
-    
-    # (分类和返回逻辑不变)
-    mismatch_filter = ((merged_df['start_date_file1'] != merged_df['start_date_file2']) | (merged_df['end_date_file1'] != merged_df['end_date_file2']))
-    date_mismatch = merged_df[mismatch_filter.fillna(False)].dropna(subset=['start_date_file1', 'start_date_file2'])
-    fully_matched_filter = ((merged_df['start_date_file1'] == merged_df['start_date_file2']) & (merged_df['end_date_file1'] == merged_df['end_date_file2']))
-    fully_matched = merged_df[fully_matched_filter.fillna(False)].dropna(subset=['start_date_file1', 'start_date_file2'])
-    in_file1_not_in_file2 = merged_df[merged_df['start_date_file2'].isnull()]
-    in_file2_not_in_file1 = merged_df[merged_df['start_date_file1'].isnull()]
-    
-    return {
-        "mismatch": date_mismatch, 
-        "in_file1_only": in_file1_not_in_file2, 
-        "in_file2_only": in_file2_not_in_file1, 
-        "fully_matched": fully_matched
-    }
+    return standard_df
 
-# --- Streamlit App 界面 ---
-st.set_page_config(page_title="全能名单比对工具", layout="wide")
-st.title("全能名单比对工具 📄 V6.0 (最终版)")
 
-st.info("""
-**使用说明:**
-1.  分别上传任意两份需要比对的名单文件（Excel 或 CSV）。
-2.  **超强兼容性**: 
-    - **不区分文件类型**：您可以在任意一边上传销售名单或酒店名单。
-    - **自动识别列表头**：能识别如 `姓名`, `入住/抵店`, `退房/离店`, `房型/房间`, `房价/Rate` 等多种中英文表头。
-    - **自动处理同住人**：能自动拆分一个单元格内的多个名字（如 `张三、李四`）。
-3.  点击“开始比对”，下方将显示详细结果。
-""")
+# --- 界面 ---
+st.title("交互式名单比对平台 V7.0 Pro 🚀")
+st.info("请上传两个Excel或CSV文件，然后按照引导完成列的映射和房型的匹配。")
 
+# --- 步骤 1: 文件上传 ---
+st.header("第 1 步: 上传文件")
 col1, col2 = st.columns(2)
 with col1:
     uploaded_file1 = st.file_uploader("上传名单文件 1", type=['csv', 'xlsx'])
+    if uploaded_file1:
+        st.session_state.df1_name = uploaded_file1.name
+        try:
+            st.session_state.df1 = pd.read_excel(uploaded_file1) if uploaded_file1.name.endswith('xlsx') else pd.read_csv(uploaded_file1)
+        except Exception as e:
+            st.error(f"读取文件1失败: {e}")
+
 with col2:
     uploaded_file2 = st.file_uploader("上传名单文件 2", type=['csv', 'xlsx'])
-
-if st.button("🚀 开始比对"):
-    if uploaded_file1 and uploaded_file2:
+    if uploaded_file2:
+        st.session_state.df2_name = uploaded_file2.name
         try:
-            df1 = pd.read_excel(uploaded_file1, engine='openpyxl') if uploaded_file1.name.endswith('xlsx') else pd.read_csv(uploaded_file1)
-            df2 = pd.read_excel(uploaded_file2, engine='openpyxl') if uploaded_file2.name.endswith('xlsx') else pd.read_csv(uploaded_file2)
-            results = compare_lists(df1, df2)
-            
-            if results:
-                st.success("比对完成！结果如下：")
-                
-                # --- 结果展示 ---
-                st.header("1. 信息不一致的名单")
-                if not results["mismatch"].empty:
-                    st.dataframe(results["mismatch"], use_container_width=True)
-                else:
-                    st.write("✅ 两份名单中共同存在的人员，信息均一致。")
-
-                st.header(f"2. 仅存在于名单 1 ({uploaded_file1.name}) 的人员")
-                if not results["in_file1_only"].empty:
-                    st.warning(f"共发现 {len(results['in_file1_only'])} 人，请关注！")
-                    with st.expander("点击查看详细名单"):
-                        st.dataframe(results["in_file1_only"], use_container_width=True)
-                else:
-                    st.write("✅ 名单1中的所有人员都在名单2中。")
-
-                st.header(f"3. 仅存在于名单 2 ({uploaded_file2.name}) 的人员")
-                if not results["in_file2_only"].empty:
-                    st.info(f"共发现 {len(results['in_file2_only'])} 人，请确认。")
-                    with st.expander("点击查看详细名单"):
-                        st.dataframe(results["in_file2_only"], use_container_width=True)
-                else:
-                    st.write("✅ 名单2中的所有人员都在名单1中。")
-
-                st.header("4. 信息完全一致的名单")
-                if not results["fully_matched"].empty:
-                     with st.expander(f"共 {len(results['fully_matched'])} 人信息完全一致，点击查看"):
-                        st.dataframe(results["fully_matched"], use_container_width=True)
-                else:
-                    st.write("没有找到信息完全一致的人员。")
-
+            st.session_state.df2 = pd.read_excel(uploaded_file2) if uploaded_file2.name.endswith('xlsx') else pd.read_csv(uploaded_file2)
         except Exception as e:
-            st.error(f"处理文件时发生错误: {e}")
-            st.error("请检查文件格式是否正确，并确保核心的“姓名”和“日期”列数据有效。")
-    else:
-        st.warning("请确保两个文件都已上传。")
+            st.error(f"读取文件2失败: {e}")
+
+# 当两个文件都上传成功后，显示后续步骤
+if st.session_state.df1 is not None and st.session_state.df2 is not None:
+    
+    st.success("文件上传成功！请继续下一步。")
+
+    # --- 步骤 2: 映射比较列 ---
+    st.header("第 2 步: 选择用于比对的列")
+    
+    mapping = {
+        'file1': {'name': None, 'start_date': None, 'end_date': None, 'room_type': None, 'price': None},
+        'file2': {'name': None, 'start_date': None, 'end_date': None, 'room_type': None, 'price': None}
+    }
+    
+    cols1, cols2 = st.columns(2)
+    
+    with cols1:
+        st.subheader(f"文件 1: {st.session_state.df1_name}")
+        df1_cols = [None] + list(st.session_state.df1.columns)
+        mapping['file1']['name'] = st.selectbox("姓名 (必选)", df1_cols, key='f1_name')
+        mapping['file1']['start_date'] = st.selectbox("入住日期 (必选)", df1_cols, key='f1_start')
+        mapping['file1']['end_date'] = st.selectbox("离开日期 (必选)", df1_cols, key='f1_end')
+        mapping['file1']['room_type'] = st.selectbox("房型 (可选)", df1_cols, key='f1_room')
+        mapping['file1']['price'] = st.selectbox("房价 (可选)", df1_cols, key='f1_price')
+
+    with cols2:
+        st.subheader(f"文件 2: {st.session_state.df2_name}")
+        df2_cols = [None] + list(st.session_state.df2.columns)
+        mapping['file2']['name'] = st.selectbox("姓名 (必选)", df2_cols, key='f2_name')
+        mapping['file2']['start_date'] = st.selectbox("入住日期 (必选)", df2_cols, key='f2_start')
+        mapping['file2']['end_date'] = st.selectbox("离开日期 (必选)", df2_cols, key='f2_end')
+        mapping['file2']['room_type'] = st.selectbox("房型 (可选)", df2_cols, key='f2_room')
+        mapping['file2']['price'] = st.selectbox("房价 (可选)", df2_cols, key='f2_price')
+
+    # --- 步骤 3: 匹配房型 ---
+    room_type_equivalents = {}
+    if mapping['file1']['room_type'] and mapping['file2']['room_type']:
+        st.header("第 3 步: 匹配房型 (可选)")
+        st.info("如果两份名单中的房型名称不一致，您可以在此建立对应关系。")
+        
+        unique_rooms1 = st.session_state.df1[mapping['file1']['room_type']].dropna().unique()
+        unique_rooms2 = list(st.session_state.df2[mapping['file2']['room_type']].dropna().unique())
+        
+        # 使用expander避免界面过长
+        with st.expander("点击展开房型匹配设置"):
+            for room1 in unique_rooms1:
+                # 让用户为文件1的每个房型，在文件2的房型列表中选择一个或多个等价的房型
+                room_type_equivalents[room1] = st.multiselect(
+                    f"文件1中的“{room1}”等同于文件2中的:",
+                    unique_rooms2,
+                    key=f"map_{room1}"
+                )
+    
+    # --- 执行比较 ---
+    if st.button("🚀 开始比对", type="primary"):
+        # 检查核心列是否都已选择
+        if not all([mapping['file1']['name'], mapping['file1']['start_date'], mapping['file1']['end_date'],
+                    mapping['file2']['name'], mapping['file2']['start_date'], mapping['file2']['end_date']]):
+            st.error("请确保两边文件的“姓名”、“入住日期”、“离开日期”都已正确选择。")
+        else:
+            # 根据用户的映射关系，处理和标准化两个DataFrame
+            # 注意：我们将文件2的房型标准化到文件1的房型体系中
+            std_df1 = process_and_standardize(st.session_state.df1, mapping['file1'])
+            std_df2 = process_and_standardize(st.session_state.df2, mapping['file2'], room_type_equivalents)
+            
+            # 合并处理后的数据
+            merged_df = pd.merge(
+                std_df1, 
+                std_df2, 
+                on='name', 
+                how='outer', 
+                suffixes=(f'_{st.session_state.df1_name}', f'_{st.session_state.df2_name}')
+            )
+            
+            # --- 分析和展示结果 ---
+            st.header("比对结果")
+
+            # 找出存在于两边但信息不一致的数据
+            # fillna(0)是为了处理空值，避免比较时出错
+            mismatch_filter = (merged_df[f'start_date_{st.session_state.df1_name}'].notna()) & \
+                              (merged_df[f'start_date_{st.session_state.df2_name}'].notna()) & \
+                              ((merged_df[f'start_date_{st.session_state.df1_name}'] != merged_df[f'start_date_{st.session_state.df2_name}']) |
+                               (merged_df[f'end_date_{st.session_state.df1_name}'] != merged_df[f'end_date_{st.session_state.df2_name}']) |
+                               (merged_df.get(f"room_type_{st.session_state.df1_name}", pd.Series(dtype='object')).fillna(0) != merged_df.get(f"room_type_{st.session_state.df2_name}", pd.Series(dtype='object')).fillna(0)) |
+                               (merged_df.get(f"price_{st.session_state.df1_name}", pd.Series(dtype='object')).fillna(0) != merged_df.get(f"price_{st.session_state.df2_name}", pd.Series(dtype='object')).fillna(0))
+                               )
+            mismatched_df = merged_df[mismatch_filter]
+
+            in_file1_only = merged_df[merged_df[f'start_date_{st.session_state.df2_name}'].isna()]
+            in_file2_only = merged_df[merged_df[f'start_date_{st.session_state.df1_name}'].isna()]
+            
+            # 完全匹配的数据
+            matched_df = merged_df.dropna().drop(mismatched_df.index, errors='ignore')
+
+            st.subheader("1. 信息不一致的名单")
+            if not mismatched_df.empty:
+                st.dataframe(mismatched_df)
+            else:
+                st.info("✅ 两份名单中共同存在的人员，信息均一致。")
+
+            st.subheader(f"2. 仅存在于名单 1 ({st.session_state.df1_name}) 的人员")
+            if not in_file1_only.empty:
+                st.warning(f"共发现 {len(in_file1_only)} 人，请关注！")
+                st.dataframe(in_file1_only.dropna(axis=1, how='all'))
+            else:
+                st.info(f"✅ 名单1中的所有人员都在名单2中。")
+
+            st.subheader(f"3. 仅存在于名单 2 ({st.session_state.df2_name}) 的人员")
+            if not in_file2_only.empty:
+                st.info(f"共发现 {len(in_file2_only)} 人，请确认。")
+                st.dataframe(in_file2_only.dropna(axis=1, how='all'))
+            else:
+                st.info(f"✅ 名单2中的所有人员都在名单1中。")
+            
+            st.subheader("4. 信息完全一致的名单")
+            if not matched_df.empty:
+                st.dataframe(matched_df)
+            else:
+                st.info("没有找到信息完全一致的人员。")
+
+    st.header("数据预览")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.caption(f"文件 1: {st.session_state.df1_name}")
+        st.dataframe(st.session_state.df1)
+    with c2:
+        st.caption(f"文件 2: {st.session_state.df2_name}")
+        st.dataframe(st.session_state.df2)
