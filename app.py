@@ -12,12 +12,19 @@ if 'df1_name' not in st.session_state: st.session_state.df1_name = ""
 if 'df2_name' not in st.session_state: st.session_state.df2_name = ""
 
 def forensic_clean_name(name):
-    """【鉴证级清洁】只保留中文字符和英文字母，清除一切幽灵字符。"""
+    """【鉴证级清洁】三步走，清除一切幽灵字符。"""
     if not isinstance(name, str):
         return ''
-    # 使用正则表达式移除所有非中文、非字母的字符
-    cleaned_name = re.sub(r'[^\u4e00-\u9fa5a-zA-Z]', '', name)
-    return cleaned_name
+    # 第1步: Unicode NFKC 标准化，统一全角/半角等
+    try:
+        normalized_name = unicodedata.normalize('NFKC', name)
+    except:
+        normalized_name = name
+    # 第2步: 移除所有不可见的控制字符和多余空格
+    cleaned_name = re.sub(r'[\u200B-\u200D\uFEFF\s]+', '', normalized_name)
+    # 第3步: (可选，作为最后防线) 只保留中文、字母和数字
+    # cleaned_name = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', cleaned_name)
+    return cleaned_name.strip()
 
 def process_and_standardize(df, mapping, room_type_equivalents=None):
     """根据用户映射来处理和标准化DataFrame"""
@@ -38,12 +45,12 @@ def process_and_standardize(df, mapping, room_type_equivalents=None):
     if mapping['price']:
         standard_df['price'] = pd.to_numeric(df[mapping['price']], errors='coerce')
     if mapping['room_number']:
-        standard_df['room_number'] = df[mapping['room_number']].astype(str).str.strip().str.replace(r'\.0$', '', regex=True) # 清理类似 '101.0' 的情况
+        standard_df['room_number'] = df[mapping['room_number']].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
 
     # --- 拆分和终极清洁姓名 ---
     standard_df['name'] = standard_df['name'].str.replace('、', ',', regex=False).str.split(',')
     standard_df = standard_df.explode('name')
-    standard_df['name'] = standard_df['name'].apply(forensic_clean_name) # 应用鉴证级清洁
+    standard_df['name'] = standard_df['name'].apply(forensic_clean_name)
     
     standard_df.dropna(subset=['name', 'start_date', 'end_date'], inplace=True)
     standard_df = standard_df[standard_df['name'] != '']
@@ -51,8 +58,8 @@ def process_and_standardize(df, mapping, room_type_equivalents=None):
     return standard_df
 
 # --- UI Section ---
-st.title("可视化智能名单比对平台 V10.0 Forensic Edition 🏆")
-st.info("终极版：具备【鉴证级数据清洁】功能，新增【房号】比对，颜色高亮已彻底修复！")
+st.title("可视化智能名单比对平台 V11.0 Final Edition 🏆")
+st.info("终极版：具备【鉴证级数据清洁】功能，新增【房号】比对，【*号标注】和【颜色高亮】已彻底修复！")
 
 st.header("第 1 步: 上传文件")
 # (File upload UI remains the same)
@@ -118,27 +125,16 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
             
             merged_df = pd.merge(std_df1, std_df2, on='name', how='outer', suffixes=('_1', '_2'))
             
+            def is_different(val1, val2): return val1 != val2 and not (pd.isna(val1) and pd.isna(val2))
+
             def get_diff_details(row):
                 diffs = []
-                def is_different(val1, val2): return val1 != val2 and not (pd.isna(val1) and pd.isna(val2))
-                if is_different(row.get('start_date_1'), row.get('start_date_2')): diffs.append(f"入住日期")
-                if is_different(row.get('end_date_1'), row.get('end_date_2')): diffs.append(f"离开日期")
-                if is_different(row.get('room_type_1'), row.get('room_type_2')): diffs.append(f"房型")
-                if is_different(row.get('room_number_1'), row.get('room_number_2')): diffs.append(f"房号")
-                if is_different(row.get('price_1'), row.get('price_2')): diffs.append(f"房价")
+                if is_different(row.get('start_date_1'), row.get('start_date_2')): diffs.append("入住日期")
+                if is_different(row.get('end_date_1'), row.get('end_date_2')): diffs.append("离开日期")
+                if is_different(row.get('room_type_1'), row.get('room_type_2')): diffs.append("房型")
+                if is_different(row.get('room_number_1'), row.get('room_number_2')): diffs.append("房号")
+                if is_different(row.get('price_1'), row.get('price_2')): diffs.append("房价")
                 return ', '.join(diffs)
-
-            # --- 【彻底修复】重写颜色高亮逻辑 ---
-            def style_diffs(df_to_style):
-                style_df = pd.DataFrame('', index=df_to_style.index, columns=df_to_style.columns)
-                highlight_color = 'background-color: #FFC7CE'
-                for col_name in ['start_date', 'end_date', 'room_type', 'room_number', 'price']:
-                    col1, col2 = f'{col_name}_1', f'{col_name}_2'
-                    if col1 in df_to_style.columns and col2 in df_to_style.columns:
-                        mask = (df_to_style[col1] != df_to_style[col2]) & ~(df_to_style[col1].isna() & df_to_style[col2].isna())
-                        style_df.loc[mask, col1] = highlight_color
-                        style_df.loc[mask, col2] = highlight_color
-                return style_df
 
             both_present_filter = merged_df['start_date_1'].notna() & merged_df['start_date_2'].notna()
             temp_df = merged_df[both_present_filter].copy()
@@ -147,16 +143,34 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
             else:
                 temp_df['差异详情'] = ''
             
-            mismatched_df = temp_df[temp_df['差异详情'] != '']
+            mismatched_df = temp_df[temp_df['差异详情'] != ''].copy()
             matched_df = temp_df[temp_df['差异详情'] == '']
             in_file1_only = merged_df[merged_df['start_date_2'].isna()]
             in_file2_only = merged_df[merged_df['start_date_1'].isna()]
 
+            # --- 【全新功能】添加*号标注 和 【彻底修复】颜色高亮 ---
+            def style_and_annotate_diffs(df):
+                df_to_display = df.copy()
+                style_df = pd.DataFrame('', index=df.index, columns=df.columns)
+                highlight_color = 'background-color: #FFC7CE'
+                
+                for col_name in ['start_date', 'end_date', 'room_type', 'room_number', 'price']:
+                    col1, col2 = f'{col_name}_1', f'{col_name}_2'
+                    if col1 in df.columns and col2 in df.columns:
+                        for idx in df.index:
+                            val1, val2 = df.loc[idx, col1], df.loc[idx, col2]
+                            if is_different(val1, val2):
+                                style_df.loc[idx, col1] = highlight_color
+                                style_df.loc[idx, col2] = highlight_color
+                                df_to_display.loc[idx, col1] = f"*{val1}"
+                                df_to_display.loc[idx, col2] = f"*{val2}"
+                return df_to_display.style.apply(lambda s: style_df, axis=None)
+
             st.header("比对结果")
-            st.subheader("1. 信息不一致的名单 (差异项已高亮)")
+            st.subheader("1. 信息不一致的名单 (*号标注并高亮差异项)")
             if not mismatched_df.empty:
                 display_cols = ['name', '差异详情'] + [col for col in mismatched_df.columns if col not in ['name', '差异详情']]
-                st.dataframe(mismatched_df[display_cols].style.apply(style_diffs, axis=None))
+                st.dataframe(style_and_annotate_diffs(mismatched_df[display_cols]))
             else:
                 st.info("✅ 两份名单中共同存在的人员，信息均一致。")
             st.subheader(f"2. 仅存在于名单 1 ({st.session_state.df1_name}) 的人员")
