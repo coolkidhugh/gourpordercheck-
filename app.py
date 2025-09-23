@@ -1,10 +1,10 @@
 import pandas as pd
 import streamlit as st
+import re
 
 st.set_page_config(page_title="可视化智能名单比对平台", layout="wide")
 
 # --- Initialize Session State ---
-# (No changes needed here)
 if 'df1' not in st.session_state:
     st.session_state.df1 = None
 if 'df2' not in st.session_state:
@@ -15,7 +15,7 @@ if 'df2_name' not in st.session_state:
     st.session_state.df2_name = ""
 
 def process_and_standardize(df, mapping, room_type_equivalents=None):
-    """(No changes needed here) Processes and standardizes the DataFrame based on user mapping."""
+    """Processes and standardizes the DataFrame based on user mapping."""
     if not all([mapping['name'], mapping['start_date'], mapping['end_date']]):
         return None
 
@@ -33,20 +33,23 @@ def process_and_standardize(df, mapping, room_type_equivalents=None):
     if mapping['price']:
         standard_df['price'] = pd.to_numeric(df[mapping['price']], errors='coerce')
         
+    # --- 【核心修复】深度清洁姓名列 ---
+    # 1. 拆分同住人
     standard_df['name'] = standard_df['name'].str.replace('、', ',', regex=False).str.split(',')
     standard_df = standard_df.explode('name')
-    standard_df['name'] = standard_df['name'].str.strip()
+    
+    # 2. 移除所有类型的空白字符（包括中间的），并只保留文字
+    standard_df['name'] = standard_df['name'].str.replace(r'\s+', '', regex=True)
     
     standard_df.dropna(subset=['name', 'start_date', 'end_date'], inplace=True)
     standard_df = standard_df[standard_df['name'] != '']
     
     return standard_df
 
-# --- UI Section ---
-st.title("可视化智能名单比对平台 V9.1 Resilient ✨")
+# --- (后续所有UI和比对逻辑代码与V9.1版本完全相同，无需改动) ---
+st.title("可视化智能名单比对平台 V9.2 Deep Clean ✨")
 st.info("最终修复版：上传文件 -> 映射列 -> 匹配房型 -> 查看带【颜色高亮】和【差异说明】的比对结果！")
 
-# (File upload and column mapping UI remains the same)
 st.header("第 1 步: 上传文件")
 col1, col2 = st.columns(2)
 with col1:
@@ -111,9 +114,6 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
             
             merged_df = pd.merge(std_df1, std_df2, on='name', how='outer', suffixes=('_1', '_2'))
             
-            # --- 【CORE FIX】 Logic completely rebuilt for stability ---
-            
-            # 1. Define functions for details and styling
             def get_diff_details(row):
                 diffs = []
                 if row.get('start_date_1') != row.get('start_date_2'): diffs.append(f"入住日期: {row.get('start_date_1')} != {row.get('start_date_2')}")
@@ -131,28 +131,23 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
                 if row.get('price_1') != row.get('price_2'): styles[['price_1', 'price_2']] = highlight_color
                 return styles
 
-            # 2. First, create the details column for all potential mismatches
             both_present_filter = merged_df['start_date_1'].notna() & merged_df['start_date_2'].notna()
             temp_df = merged_df[both_present_filter].copy()
             if not temp_df.empty:
                 temp_df['差异详情'] = temp_df.apply(get_diff_details, axis=1)
             else:
-                temp_df['差异详情'] = '' # Ensure column exists even if no common names
+                temp_df['差异详情'] = ''
             
-            # 3. Now, filter based on the created column
             mismatched_df = temp_df[temp_df['差异详情'] != '']
             matched_df = temp_df[temp_df['差异详情'] == '']
             
-            # 4. Get other categories
             in_file1_only = merged_df[merged_df['start_date_2'].isna()]
             in_file2_only = merged_df[merged_df['start_date_1'].isna()]
 
-            # --- Display Results ---
             st.header("比对结果")
             st.subheader("1. 信息不一致的名单 (差异项已高亮)")
             if not mismatched_df.empty:
                 display_cols = ['name', '差异详情'] + [col for col in mismatched_df.columns if col not in ['name', '差异详情']]
-                # Apply styling only on the final filtered dataframe
                 st.dataframe(mismatched_df[display_cols].style.apply(style_diffs, axis=1))
             else:
                 st.info("✅ 两份名单中共同存在的人员，信息均一致。")
