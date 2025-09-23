@@ -1,21 +1,26 @@
 import pandas as pd
 import streamlit as st
 import re
+import unicodedata
 
 st.set_page_config(page_title="可视化智能名单比对平台", layout="wide")
 
 # --- Initialize Session State ---
-if 'df1' not in st.session_state:
-    st.session_state.df1 = None
-if 'df2' not in st.session_state:
-    st.session_state.df2 = None
-if 'df1_name' not in st.session_state:
-    st.session_state.df1_name = ""
-if 'df2_name' not in st.session_state:
-    st.session_state.df2_name = ""
+if 'df1' not in st.session_state: st.session_state.df1 = None
+if 'df2' not in st.session_state: st.session_state.df2 = None
+if 'df1_name' not in st.session_state: st.session_state.df1_name = ""
+if 'df2_name' not in st.session_state: st.session_state.df2_name = ""
+
+def deep_clean_name(name):
+    """【终极清洁】使用Unicode NFKC标准化来处理最顽固的隐形字符"""
+    # 1. 应用NFKC标准化，处理全角/半角等兼容性字符
+    normalized_name = unicodedata.normalize('NFKC', name)
+    # 2. 移除所有空白字符
+    no_whitespace_name = re.sub(r'\s+', '', normalized_name)
+    return no_whitespace_name
 
 def process_and_standardize(df, mapping, room_type_equivalents=None):
-    """Processes and standardizes the DataFrame based on user mapping."""
+    """根据用户映射来处理和标准化DataFrame"""
     if not all([mapping['name'], mapping['start_date'], mapping['end_date']]):
         return None
 
@@ -32,23 +37,24 @@ def process_and_standardize(df, mapping, room_type_equivalents=None):
 
     if mapping['price']:
         standard_df['price'] = pd.to_numeric(df[mapping['price']], errors='coerce')
+    
+    # 【新增】处理房号列
+    if mapping['room_number']:
+        standard_df['room_number'] = df[mapping['room_number']].astype(str).str.strip()
         
-    # --- 【核心修复】深度清洁姓名列 ---
-    # 1. 拆分同住人
+    # --- 拆分和深度清洁姓名 ---
     standard_df['name'] = standard_df['name'].str.replace('、', ',', regex=False).str.split(',')
     standard_df = standard_df.explode('name')
-    
-    # 2. 移除所有类型的空白字符（包括中间的），并只保留文字
-    standard_df['name'] = standard_df['name'].str.replace(r'\s+', '', regex=True)
+    standard_df['name'] = standard_df['name'].apply(deep_clean_name) # 应用终极清洁函数
     
     standard_df.dropna(subset=['name', 'start_date', 'end_date'], inplace=True)
     standard_df = standard_df[standard_df['name'] != '']
     
     return standard_df
 
-# --- (后续所有UI和比对逻辑代码与V9.1版本完全相同，无需改动) ---
-st.title("可视化智能名单比对平台 V9.2 Deep Clean ✨")
-st.info("最终修复版：上传文件 -> 映射列 -> 匹配房型 -> 查看带【颜色高亮】和【差异说明】的比对结果！")
+# --- UI Section ---
+st.title("可视化智能名单比对平台 V9.4 Ultimate Pro 🏆")
+st.info("最终版：具备【终极数据清洁】功能，新增【房号】比对，确保匹配万无一失！")
 
 st.header("第 1 步: 上传文件")
 col1, col2 = st.columns(2)
@@ -84,6 +90,7 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
         mapping['file1']['start_date'] = st.selectbox("入住日期 (必选)", df1_cols, key='f1_start')
         mapping['file1']['end_date'] = st.selectbox("离开日期 (必选)", df1_cols, key='f1_end')
         mapping['file1']['room_type'] = st.selectbox("房型 (可选)", df1_cols, key='f1_room')
+        mapping['file1']['room_number'] = st.selectbox("房号 (可选)", df1_cols, key='f1_room_num') # 新增
         mapping['file1']['price'] = st.selectbox("房价 (可选)", df1_cols, key='f1_price')
 
     with cols2:
@@ -93,6 +100,7 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
         mapping['file2']['start_date'] = st.selectbox("入住日期 (必选)", df2_cols, key='f2_start')
         mapping['file2']['end_date'] = st.selectbox("离开日期 (必选)", df2_cols, key='f2_end')
         mapping['file2']['room_type'] = st.selectbox("房型 (可选)", df2_cols, key='f2_room')
+        mapping['file2']['room_number'] = st.selectbox("房号 (可选)", df2_cols, key='f2_room_num') # 新增
         mapping['file2']['price'] = st.selectbox("房价 (可选)", df2_cols, key='f2_price')
 
     st.header("第 3 步: 匹配房型 (可选)")
@@ -116,19 +124,35 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
             
             def get_diff_details(row):
                 diffs = []
-                if row.get('start_date_1') != row.get('start_date_2'): diffs.append(f"入住日期: {row.get('start_date_1')} != {row.get('start_date_2')}")
-                if row.get('end_date_1') != row.get('end_date_2'): diffs.append(f"离开日期: {row.get('end_date_1')} != {row.get('end_date_2')}")
-                if row.get('room_type_1') != row.get('room_type_2'): diffs.append(f"房型: {row.get('room_type_1')} != {row.get('room_type_2')}")
-                if row.get('price_1') != row.get('price_2'): diffs.append(f"房价: {row.get('price_1')} != {row.get('price_2')}")
+                def is_different(val1, val2): return val1 != val2 and not (pd.isna(val1) and pd.isna(val2))
+
+                if is_different(row.get('start_date_1'), row.get('start_date_2')): diffs.append(f"入住日期: {row.get('start_date_1')} != {row.get('start_date_2')}")
+                if is_different(row.get('end_date_1'), row.get('end_date_2')): diffs.append(f"离开日期: {row.get('end_date_1')} != {row.get('end_date_2')}")
+                if is_different(row.get('room_type_1'), row.get('room_type_2')): diffs.append(f"房型: {row.get('room_type_1')} != {row.get('room_type_2')}")
+                if is_different(row.get('room_number_1'), row.get('room_number_2')): diffs.append(f"房号: {row.get('room_number_1')} != {row.get('room_number_2')}")
+                if is_different(row.get('price_1'), row.get('price_2')): diffs.append(f"房价: {row.get('price_1')} != {row.get('price_2')}")
                 return ', '.join(diffs)
 
             def style_diffs(row):
-                styles = pd.Series('', index=row.index)
+                styles = [''] * len(row.index)
                 highlight_color = 'background-color: #FFC7CE'
-                if row.get('start_date_1') != row.get('start_date_2'): styles[['start_date_1', 'start_date_2']] = highlight_color
-                if row.get('end_date_1') != row.get('end_date_2'): styles[['end_date_1', 'end_date_2']] = highlight_color
-                if row.get('room_type_1') != row.get('room_type_2'): styles[['room_type_1', 'room_type_2']] = highlight_color
-                if row.get('price_1') != row.get('price_2'): styles[['price_1', 'price_2']] = highlight_color
+                def is_different(val1, val2): return val1 != val2 and not (pd.isna(val1) and pd.isna(val2))
+
+                if is_different(row.get('start_date_1'), row.get('start_date_2')):
+                    styles[row.index.get_loc('start_date_1')] = highlight_color
+                    styles[row.index.get_loc('start_date_2')] = highlight_color
+                if is_different(row.get('end_date_1'), row.get('end_date_2')):
+                    styles[row.index.get_loc('end_date_1')] = highlight_color
+                    styles[row.index.get_loc('end_date_2')] = highlight_color
+                if is_different(row.get('room_type_1'), row.get('room_type_2')):
+                    if 'room_type_1' in row.index: styles[row.index.get_loc('room_type_1')] = highlight_color
+                    if 'room_type_2' in row.index: styles[row.index.get_loc('room_type_2')] = highlight_color
+                if is_different(row.get('room_number_1'), row.get('room_number_2')):
+                    if 'room_number_1' in row.index: styles[row.index.get_loc('room_number_1')] = highlight_color
+                    if 'room_number_2' in row.index: styles[row.index.get_loc('room_number_2')] = highlight_color
+                if is_different(row.get('price_1'), row.get('price_2')):
+                    if 'price_1' in row.index: styles[row.index.get_loc('price_1')] = highlight_color
+                    if 'price_2' in row.index: styles[row.index.get_loc('price_2')] = highlight_color
                 return styles
 
             both_present_filter = merged_df['start_date_1'].notna() & merged_df['start_date_2'].notna()
@@ -140,7 +164,6 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
             
             mismatched_df = temp_df[temp_df['差异详情'] != '']
             matched_df = temp_df[temp_df['差异详情'] == '']
-            
             in_file1_only = merged_df[merged_df['start_date_2'].isna()]
             in_file2_only = merged_df[merged_df['start_date_1'].isna()]
 
