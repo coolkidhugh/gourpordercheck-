@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="智能交互名单比对平台", layout="wide")
+st.set_page_config(page_title="可视化智能名单比对平台", layout="wide")
 
 # --- 初始化 Session State ---
 if 'df1' not in st.session_state:
@@ -12,7 +12,6 @@ if 'df1_name' not in st.session_state:
     st.session_state.df1_name = ""
 if 'df2_name' not in st.session_state:
     st.session_state.df2_name = ""
-
 
 def process_and_standardize(df, mapping, room_type_equivalents=None):
     """根据用户映射来处理和标准化DataFrame"""
@@ -43,9 +42,10 @@ def process_and_standardize(df, mapping, room_type_equivalents=None):
     return standard_df
 
 # --- 界面 ---
-st.title("智能交互名单比对平台 V8.0 Final 🎯")
-st.info("请上传文件，然后通过下拉菜单完成列的映射和房型的匹配，最终结果将明确指出差异项。")
+st.title("可视化智能名单比对平台 V9.0 Ultimate ✨")
+st.info("终极版功能：上传文件 -> 映射列 -> 匹配房型 -> 查看带【颜色高亮】和【差异说明】的比对结果！")
 
+# (文件上传和映射部分的UI代码与V8版本相同，此处保持不变)
 # --- 步骤 1: 文件上传 ---
 st.header("第 1 步: 上传文件")
 col1, col2 = st.columns(2)
@@ -98,8 +98,8 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
     if mapping['file1']['room_type'] and mapping['file2']['room_type']:
         st.header("第 3 步: 匹配房型 (可选)")
         with st.expander("如果两份名单中的房型名称不一致，请在此建立对应关系"):
-            unique_rooms1 = st.session_state.df1[mapping['file1']['room_type']].dropna().unique()
-            unique_rooms2 = list(st.session_state.df2[mapping['file2']['room_type']].dropna().unique())
+            unique_rooms1 = st.session_state.df1[mapping['file1']['room_type']].dropna().astype(str).unique()
+            unique_rooms2 = list(st.session_state.df2[mapping['file2']['room_type']].dropna().astype(str).unique())
             for room1 in unique_rooms1:
                 room_type_equivalents[room1] = st.multiselect(f"文件1的“{room1}”等同于文件2的:", unique_rooms2, key=f"map_{room1}")
     
@@ -112,40 +112,56 @@ if st.session_state.df1 is not None and st.session_state.df2 is not None:
             std_df1 = process_and_standardize(st.session_state.df1, mapping['file1'])
             std_df2 = process_and_standardize(st.session_state.df2, mapping['file2'], room_type_equivalents)
             
-            merged_df = pd.merge(std_df1, std_df2, on='name', how='outer', suffixes=(f'_1', f'_2'))
+            merged_df = pd.merge(std_df1, std_df2, on='name', how='outer', suffixes=('_1', '_2'))
             
-            # --- 【核心升级】找出差异并生成说明 ---
-            def get_diff_details(row):
+            # --- 【核心升级】定义颜色高亮和差异说明的逻辑 ---
+            def highlight_and_describe_diffs(row):
+                styles = [''] * len(row)
                 diffs = []
-                # 比较日期
-                if row['start_date_1'] != row['start_date_2']: diffs.append(f"入住日期: {row['start_date_1']} != {row['start_date_2']}")
-                if row['end_date_1'] != row['end_date_2']: diffs.append(f"离开日期: {row['end_date_1']} != {row['end_date_2']}")
-                # 比较房型 (如果存在)
-                if 'room_type_1' in row and 'room_type_2' in row and row['room_type_1'] != row['room_type_2']:
-                    diffs.append(f"房型: {row['room_type_1']} != {row['room_type_2']}")
-                # 比较房价 (如果存在)
-                if 'price_1' in row and 'price_2' in row and row['price_1'] != row['price_2']:
-                    diffs.append(f"房价: {row['price_1']} != {row['price_2']}")
-                return ', '.join(diffs)
+                highlight_color = 'background-color: #FFC7CE' # 淡红色
 
-            # 筛选出同时存在于两表的数据行
+                # 比较函数
+                def compare_and_style(col1, col2, name):
+                    val1, val2 = row.get(col1), row.get(col2)
+                    if val1 != val2:
+                        diffs.append(f"{name}: {val1} != {val2}")
+                        if col1 in row.index: styles[row.index.get_loc(col1)] = highlight_color
+                        if col2 in row.index: styles[row.index.get_loc(col2)] = highlight_color
+                
+                compare_and_style('start_date_1', 'start_date_2', '入住日期')
+                compare_and_style('end_date_1', 'end_date_2', '离开日期')
+                compare_and_style('room_type_1', 'room_type_2', '房型')
+                compare_and_style('price_1', 'price_2', '房价')
+                
+                row['差异详情'] = ', '.join(diffs)
+                return styles, row
+
             both_present_filter = merged_df['start_date_1'].notna() & merged_df['start_date_2'].notna()
             temp_df = merged_df[both_present_filter].copy()
-            temp_df['差异详情'] = temp_df.apply(get_diff_details, axis=1)
             
-            # 存在差异的行
+            # 应用差异分析
+            analysis_results = [highlight_and_describe_diffs(row) for index, row in temp_df.iterrows()]
+            styles_list = [res[0] for res in analysis_results]
+            updated_rows = [res[1] for res in analysis_results]
+            
+            if updated_rows:
+                temp_df = pd.DataFrame(updated_rows, index=temp_df.index)
+                styler = temp_df.style.apply(lambda s, styles: styles.pop(0), styles=styles_list, axis=None)
+            else:
+                styler = temp_df.style # 如果没有不匹配项，则使用默认样式
+            
             mismatched_df = temp_df[temp_df['差异详情'] != '']
-            
+            matched_df = temp_df[temp_df['差异详情'] == '']
             in_file1_only = merged_df[merged_df['start_date_2'].isna()]
             in_file2_only = merged_df[merged_df['start_date_1'].isna()]
-            matched_df = temp_df[temp_df['差异详情'] == '']
 
             # --- 展示结果 ---
             st.header("比对结果")
-            st.subheader("1. 信息不一致的名单")
+            st.subheader("1. 信息不一致的名单 (差异项已高亮)")
             if not mismatched_df.empty:
                 display_cols = ['name', '差异详情'] + [col for col in mismatched_df.columns if col not in ['name', '差异详情']]
-                st.dataframe(mismatched_df[display_cols])
+                # 应用样式并展示
+                st.dataframe(mismatched_df[display_cols].style.apply(highlight_and_describe_diffs, axis=1)[0])
             else:
                 st.info("✅ 两份名单中共同存在的人员，信息均一致。")
 
