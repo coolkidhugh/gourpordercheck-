@@ -31,8 +31,6 @@ def process_and_standardize(df, mapping, case_insensitive=False, room_type_equiv
         return None
 
     standard_df = pd.DataFrame()
-    
-    # Keep original name for display purposes in fuzzy matching
     standard_df['name_original'] = df[mapping['name']].astype(str)
     
     name_series = df[mapping['name']].astype(str).str.strip()
@@ -81,8 +79,8 @@ def style_diffs(df):
 
 # --- UI Layout ---
 
-st.title("智能可视化名单比对工具 V15.1 🚀")
-st.info("修复了模糊匹配模式下当无匹配项时程序崩溃的bug，增强了稳定性。")
+st.title("智能可视化名单比对工具 V15.2 🚀")
+st.info("修复了数据预览区不排序的bug；模糊匹配模式会找出所有相似的配对（包括100%相同），再进行信息比对。")
 
 st.header("第 1 步: 上传文件")
 if st.button("🔄 清空并重置"):
@@ -154,6 +152,11 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
             st.error("请确保两边文件的“姓名”、“入住日期”、“离开日期”都已正确选择。")
         else:
             with st.spinner('正在执行智能比对...'):
+                
+                # --- BUG FIX: Add sorting logic back in ---
+                st.session_state.df1.sort_values(by=mapping['file1']['name'], inplace=True, ignore_index=True)
+                st.session_state.df2.sort_values(by=mapping['file2']['name'], inplace=True, ignore_index=True)
+
                 std_df1 = process_and_standardize(st.session_state.df1, mapping['file1'], case_insensitive)
                 std_df2 = process_and_standardize(st.session_state.df2, mapping['file2'], case_insensitive)
                 
@@ -163,11 +166,22 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
 
                 if match_mode == "精确匹配":
                     merged_df = pd.merge(std_df1, std_df2, on='name', how='outer', suffixes=('_1', '_2'))
-                    in_file1_only = merged_df[merged_df.filter(regex='_2$').isna().all(axis=1)].copy()
-                    in_file2_only = merged_df[merged_df.filter(regex='_1$').isna().all(axis=1)].copy()
-                    # Keep only the columns from the original file for the "only" dataframes
-                    in_file1_only = in_file1_only[std_df1.columns]
-                    in_file2_only = in_file2_only[std_df2.columns]
+                    # Correctly identify "only" files in outer merge
+                    in_file1_only_mask = merged_df[std_df2.columns.drop('name').add_suffix('_2')].isna().all(axis=1)
+                    in_file2_only_mask = merged_df[std_df1.columns.drop('name').add_suffix('_1')].isna().all(axis=1)
+                    
+                    in_file1_only = merged_df[in_file1_only_mask & ~in_file2_only_mask].copy()
+                    in_file2_only = merged_df[in_file2_only_mask & ~in_file1_only_mask].copy()
+                    
+                    # Keep only relevant columns
+                    in_file1_only = in_file1_only[std_df1.columns.add_suffix('_1')]
+                    in_file1_only.columns = in_file1_only.columns.str.removesuffix('_1')
+                    in_file2_only = in_file2_only[std_df2.columns.add_suffix('_2')]
+                    in_file2_only.columns = in_file2_only.columns.str.removesuffix('_2')
+
+                    # Filter merged_df to only include rows present in both
+                    merged_df = merged_df.dropna(subset=std_df1.columns.drop('name').add_suffix('_1'))
+                    merged_df = merged_df.dropna(subset=std_df2.columns.drop('name').add_suffix('_2'))
 
                 else: # Fuzzy Match Logic
                     names1 = std_df1['name'].unique().tolist()
@@ -177,7 +191,6 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
                     matched_names1 = []
                     matched_names2 = []
 
-                    # Iterate through the smaller list for efficiency
                     if len(names1) <= len(names2):
                         for name1 in names1:
                             result = process.extractOne(name1, names2, scorer=fuzz.ratio, score_cutoff=similarity_threshold)
@@ -186,7 +199,7 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
                                 matches.append((name1, name2))
                                 matched_names1.append(name1)
                                 matched_names2.append(name2)
-                                names2.remove(name2) # Avoid re-matching
+                                names2.remove(name2)
                     else:
                         for name2 in names2:
                             result = process.extractOne(name2, names1, scorer=fuzz.ratio, score_cutoff=similarity_threshold)
@@ -204,16 +217,14 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
                             row2 = std_df2[std_df2['name'] == name2].iloc[0].add_suffix('_2')
                             combined_row = pd.concat([row1, row2])
                             matched_rows.append(combined_row)
-                        merged_df = pd.DataFrame(matched_rows)
+                        merged_df = pd.DataFrame(matched_rows).reset_index(drop=True)
                         merged_df.rename(columns={'name_1': 'name'}, inplace=True)
                     
-                    # --- ROBUST FIX for Unmatched Logic ---
                     in_file1_only = std_df1[~std_df1['name'].isin(matched_names1)].copy()
                     in_file2_only = std_df2[~std_df2['name'].isin(matched_names2)].copy()
 
-
                 # --- Comparison and result generation ---
-                temp_df = merged_df.copy() # Use merged_df directly for matched items
+                temp_df = merged_df.copy()
                 
                 def get_diff_details(row):
                     diffs = []
@@ -228,12 +239,11 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
                 if not temp_df.empty:
                     temp_df['差异摘要'] = temp_df.apply(get_diff_details, axis=1)
                 else:
-                    temp_df['差异摘要'] = '' # Handle case with no matches
+                    temp_df['差异摘要'] = ''
                 
                 mismatched_df = temp_df[temp_df['差异摘要'] != ''].copy()
                 matched_df = temp_df[temp_df['差异摘要'] == ''].copy()
                 
-                # Final result display
                 st.header("比对结果")
                 st.subheader("📊 结果摘要统计")
                 stat_cols = st.columns(5)
@@ -282,7 +292,7 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
                     st.info("没有找到信息完全一致的人员。")
 
     st.divider()
-    st.header("原始上传文件预览")
+    st.header("原始上传文件预览 (点击比对后会按姓名排序)")
     c1, c2 = st.columns(2)
     with c1:
         st.caption(f"文件 1: {st.session_state.df1_name}")
