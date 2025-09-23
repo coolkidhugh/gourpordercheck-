@@ -3,7 +3,7 @@ import streamlit as st
 import re
 import unicodedata
 
-st.set_page_config(page_title="在线可视化名单比对", layout="wide")
+st.set_page_config(page_title="精准可视化名单比对", layout="wide")
 
 # --- Session State Initialization ---
 if 'df1' not in st.session_state: st.session_state.df1 = None
@@ -14,32 +14,33 @@ if 'df2_name' not in st.session_state: st.session_state.df2_name = ""
 # --- Helper Functions ---
 
 def forensic_clean_name(name, case_insensitive=False):
-    """Forensic-level cleaning for names: normalizes, removes invisible chars."""
-    if not isinstance(name, str):
-        return ''
+    """Cleans and standardizes name strings."""
+    if not isinstance(name, str): return ''
     try:
-        normalized_name = unicodedata.normalize('NFKC', name)
+        name = unicodedata.normalize('NFKC', name)
     except:
-        normalized_name = name
-    cleaned_name = re.sub(r'[\u200B-\u200D\uFEFF\s]+', '', normalized_name).strip()
-    if case_insensitive:
-        cleaned_name = cleaned_name.lower()
-    return cleaned_name
+        pass
+    name = re.sub(r'[\u200B-\u200D\uFEFF\s]+', '', name).strip()
+    return name.lower() if case_insensitive else name
 
 def process_and_standardize(df, mapping, case_insensitive=False, room_type_equivalents=None):
-    """Standardizes a DataFrame based on user's column mapping."""
+    """Reads, cleans, and standardizes the dataframe based on user mapping."""
     if not all([mapping['name'], mapping['start_date'], mapping['end_date']]):
         return None
 
     standard_df = pd.DataFrame()
     standard_df['name'] = df[mapping['name']].astype(str)
-    standard_df['start_date'] = pd.to_datetime(df[mapping['start_date']], errors='coerce').dt.date
-    standard_df['end_date'] = pd.to_datetime(df[mapping['end_date']], errors='coerce').dt.date
+    
+    # --- MAJOR FIX for Date Comparison ---
+    # Convert to datetime, then immediately to a standardized YYYY-MM-DD string.
+    # This eliminates any underlying format/type differences (e.g., Date vs. Timestamp).
+    standard_df['start_date'] = pd.to_datetime(df[mapping['start_date']], errors='coerce').dt.strftime('%Y-%m-%d')
+    standard_df['end_date'] = pd.to_datetime(df[mapping['end_date']], errors='coerce').dt.strftime('%Y-%m-%d')
     
     if mapping['room_type']:
         standard_df['room_type'] = df[mapping['room_type']].astype(str).str.strip()
         if room_type_equivalents:
-            reverse_map = {value: key for key, values in room_type_equivalents.items() for value in values}
+            reverse_map = {v: k for k, values in room_type_equivalents.items() for v in values}
             standard_df['room_type'] = standard_df['room_type'].replace(reverse_map)
     if mapping['price']:
         standard_df['price'] = pd.to_numeric(df[mapping['price']], errors='coerce')
@@ -50,28 +51,24 @@ def process_and_standardize(df, mapping, case_insensitive=False, room_type_equiv
     standard_df = standard_df.explode('name')
     standard_df['name'] = standard_df['name'].apply(forensic_clean_name, case_insensitive=case_insensitive)
     
+    # Drop rows if the string conversion of dates resulted in NaT -> NaN
     standard_df.dropna(subset=['name', 'start_date', 'end_date'], inplace=True)
     standard_df = standard_df[standard_df['name'] != '']
     
     return standard_df
 
 def style_diffs(df):
-    """Applies color highlighting to differing cells in a DataFrame."""
+    """Applies color highlighting to differing cells."""
     style_df = pd.DataFrame('', index=df.index, columns=df.columns)
-    highlight_color = 'background-color: #FFC7CE' # Light red for visibility
-
-    # Define pairs of columns to compare
+    highlight_color = 'background-color: #FFC7CE'
     compare_cols = ['start_date', 'end_date', 'room_type', 'room_number', 'price']
 
     for col_base in compare_cols:
-        col1 = f'{col_base}_1'
-        col2 = f'{col_base}_2'
+        col1, col2 = f'{col_base}_1', f'{col_base}_2'
         if col1 in df.columns and col2 in df.columns:
-            # Vectorized comparison for efficiency
+            # NaNs were handled by strftime, so a direct comparison is now safe.
             is_diff = df[col1] != df[col2]
-            # Handle NaNs properly - they shouldn't be marked as different if both are NaN
             is_diff &= ~(df[col1].isna() & df[col2].isna())
-            
             style_df.loc[is_diff, col1] = highlight_color
             style_df.loc[is_diff, col2] = highlight_color
             
@@ -79,14 +76,12 @@ def style_diffs(df):
 
 # --- UI Layout ---
 
-st.title("在线可视化名单比对工具 V13.0 ✨")
-st.info("全新升级：移除下载功能，专注在线比对，差异信息自动高亮，结果一目了然！")
+st.title("精准可视化名单比对工具 V13.1 🎯")
+st.info("精准模式：彻底解决日期格式问题，新增“差异摘要”列并置顶，比对更准、查看更易！")
 
 st.header("第 1 步: 上传文件")
-
 if st.button("🔄 清空并重置"):
-    for key in st.session_state.keys():
-        del st.session_state[key]
+    st.session_state.clear()
     st.rerun()
 
 col1, col2 = st.columns(2)
@@ -139,25 +134,23 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
 
 
     st.header("第 3 步: 配置与执行")
+    # ... (Room type mapping and checkbox UI remains the same)
     room_type_equivalents = {}
     if mapping['file1']['room_type'] and mapping['file2']['room_type']:
         with st.expander("如果两份名单中的房型名称不一致，请在此建立对应关系"):
-            # ... (Room type mapping logic remains the same)
             unique_rooms1 = st.session_state.df1[mapping['file1']['room_type']].dropna().astype(str).unique()
             unique_rooms2 = list(st.session_state.df2[mapping['file2']['room_type']].dropna().astype(str).unique())
             for room1 in unique_rooms1:
                 room_type_equivalents[room1] = st.multiselect(f"文件1的“{room1}”等同于文件2的:", unique_rooms2, key=f"map_{room1}")
-
     
     case_insensitive = st.checkbox("比对英文名时忽略大小写 (e.g., 'John' = 'john')")
     
     if st.button("🚀 开始比对", type="primary"):
-        # ... (Validation and processing logic)
         if not all([mapping['file1']['name'], mapping['file1']['start_date'], mapping['file1']['end_date'],
                     mapping['file2']['name'], mapping['file2']['start_date'], mapping['file2']['end_date']]):
             st.error("请确保两边文件的“姓名”、“入住日期”、“离开日期”都已正确选择。")
         else:
-            with st.spinner('正在比对分析，请稍候...'):
+            with st.spinner('正在执行精准比对...'):
                 st.session_state.df1.sort_values(by=mapping['file1']['name'], inplace=True, ignore_index=True)
                 st.session_state.df2.sort_values(by=mapping['file2']['name'], inplace=True, ignore_index=True)
 
@@ -178,16 +171,19 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
 
                 both_present = merged_df['start_date_1'].notna() & merged_df['start_date_2'].notna()
                 temp_df = merged_df[both_present].copy()
-                temp_df['差异详情'] = temp_df.apply(get_diff_details, axis=1) if not temp_df.empty else ''
+                if not temp_df.empty:
+                    temp_df['差异摘要'] = temp_df.apply(get_diff_details, axis=1)
+                else:
+                    temp_df['差异摘要'] = ''
                 
-                mismatched_df = temp_df[temp_df['差异详情'] != ''].copy()
-                matched_df = temp_df[temp_df['差异详情'] == ''].copy()
+                mismatched_df = temp_df[temp_df['差异摘要'] != ''].copy()
+                matched_df = temp_df[temp_df['差异摘要'] == ''].copy()
                 in_file1_only = merged_df[merged_df['start_date_2'].isna()].copy()
                 in_file2_only = merged_df[merged_df['start_date_1'].isna()].copy()
 
                 st.header("比对结果")
-
                 st.subheader("📊 结果摘要统计")
+                # ... (Summary stats UI remains the same)
                 stat_cols = st.columns(5)
                 stat_cols[0].metric("名单1 总人数", len(std_df1))
                 stat_cols[1].metric("名单2 总人数", len(std_df2))
@@ -195,15 +191,18 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
                 stat_cols[3].metric("⚠️ 信息不一致", len(mismatched_df), delta_color="inverse")
                 stat_cols[4].metric("❓ 单边存在人数", len(in_file1_only) + len(in_file2_only))
                 
-                st.subheader("1. 信息不一致的名单 (差异项已高亮)")
+                st.subheader("1. 信息不一致的名单 (先看“差异摘要”，再看高亮项)")
                 if not mismatched_df.empty:
-                    # Use the new styling function here!
+                    # --- MAJOR FIX for column order ---
+                    # Move the summary column to the front for clarity.
+                    cols_order = ['差异摘要', 'name'] + [c for c in mismatched_df.columns if c not in ['差异摘要', 'name']]
+                    mismatched_df = mismatched_df[cols_order]
                     st.dataframe(style_diffs(mismatched_df))
                 else:
                     st.info("✅ 两份名单中共同存在的人员，信息均一致。")
 
-                # ... (Display for in_file1_only, in_file2_only, matched_df remains the same)
                 st.subheader(f"2. 仅存在于名单 1 ({st.session_state.df1_name}) 的人员")
+                # ... (Display for in_file1_only remains the same)
                 if not in_file1_only.empty:
                     st.warning(f"共发现 {len(in_file1_only)} 人")
                     st.dataframe(in_file1_only.dropna(axis=1, how='all'))
@@ -211,6 +210,7 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
                     st.info(f"✅ 名单1中的所有人员都在名单2中。")
 
                 st.subheader(f"3. 仅存在于名单 2 ({st.session_state.df2_name}) 的人员")
+                # ... (Display for in_file2_only remains the same)
                 if not in_file2_only.empty:
                     st.info(f"共发现 {len(in_file2_only)} 人")
                     st.dataframe(in_file2_only.dropna(axis=1, how='all'))
@@ -218,9 +218,10 @@ if 'df1' in st.session_state and st.session_state.df1 is not None and \
                     st.info(f"✅ 名单2中的所有人员都在名单1中。")
                 
                 st.subheader("4. 信息完全一致的名单")
+                # ... (Display for matched_df remains the same)
                 if not matched_df.empty:
                     with st.expander(f"共 {len(matched_df)} 人信息完全一致，点击查看"):
-                        st.dataframe(matched_df.drop(columns=['差异详情']))
+                        st.dataframe(matched_df.drop(columns=['差异摘要']))
                 else:
                     st.info("没有找到信息完全一致的人员。")
 
