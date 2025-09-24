@@ -2,27 +2,15 @@ import pandas as pd
 import streamlit as st
 import re
 import unicodedata
-from thefuzz import process, fuzz
 
-st.set_page_config(page_title="智能可视化名单比对", layout="wide")
-
-# --- Session State Initialization ---
-SESSION_DEFAULTS = {
-    'df1': None, 'df2': None, 'df1_name': "", 'df2_name': "",
-    'ran_comparison': False, 'mismatched_df': pd.DataFrame(),
-    'matched_df': pd.DataFrame(), 'in_file1_only': pd.DataFrame(),
-    'in_file2_only': pd.DataFrame(), 'std_df1': pd.DataFrame(), 
-    'std_df2': pd.DataFrame(), 'match_mode': '精确匹配',
-    'compare_cols': []
-}
-for key, value in SESSION_DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
+st.set_page_config(page_title="总览对齐比对工具", layout="wide")
 
 # --- Helper Functions ---
 
 def forensic_clean_text(text):
-    if not isinstance(text, str): return text
+    """Applies the highest level of cleaning to any text string."""
+    if not isinstance(text, str):
+        return text
     try:
         cleaned_text = unicodedata.normalize('NFKC', text)
     except TypeError:
@@ -30,168 +18,134 @@ def forensic_clean_text(text):
     cleaned_text = re.sub(r'[\u200B-\u200D\uFEFF\s\xa0]+', '', cleaned_text)
     return cleaned_text.strip()
 
-def process_and_standardize(df, mapping, case_insensitive=False, room_type_equivalents=None):
-    if not all([mapping.get('name'), mapping.get('start_date'), mapping.get('end_date')]):
-        return None
+def process_and_get_names(df, name_col):
+    """Cleans the name column and returns a clean set of unique names."""
+    if not name_col or name_col not in df.columns:
+        return set()
     
-    standard_df = pd.DataFrame()
-    standard_df['name_original'] = df[mapping['name']].astype(str)
+    names = df[name_col].dropna().astype(str)
     
-    name_series = df[mapping['name']].astype(str).apply(forensic_clean_text)
-    start_date_series = df[mapping['start_date']].astype(str).str.strip()
-    end_date_series = df[mapping['end_date']].astype(str).str.strip()
+    # Split names by various delimiters and explode into separate rows
+    names = names.str.split(r'[、,，/]').explode()
     
-    standard_df['start_date'] = pd.to_datetime(start_date_series, errors='coerce').dt.strftime('%Y-%m-%d')
-    standard_df['end_date'] = pd.to_datetime(end_date_series, errors='coerce').dt.strftime('%Y-%m-%d')
+    # Apply forensic cleaning to each name
+    names = names.apply(forensic_clean_text)
     
-    if mapping.get('room_type') and mapping['room_type'] in df.columns:
-        standard_df['room_type'] = df[mapping['room_type']].astype(str).apply(forensic_clean_text)
-        if room_type_equivalents:
-            cleaned_equivalents = {forensic_clean_text(k): [forensic_clean_text(val) for val in v] for k, v in room_type_equivalents.items()}
-            reverse_map = {val: key for key, values in cleaned_equivalents.items() for val in values}
-            standard_df['room_type'] = standard_df['room_type'].replace(reverse_map)
+    # Remove any empty strings that might result from splitting
+    names = names[names != '']
+    
+    return set(names)
 
-    if mapping.get('room_number') and mapping['room_number'] in df.columns:
-        standard_df['room_number'] = df[mapping['room_number']].astype(str).apply(forensic_clean_text)
-    
-    name_series = name_series.str.split(r'[、,，/]')
-    standard_df = standard_df.assign(name=name_series).explode('name')
-    standard_df['name'] = standard_df['name'].apply(forensic_clean_text)
-    
-    if case_insensitive:
-        standard_df['name'] = standard_df['name'].str.lower()
-    
-    standard_df.dropna(subset=['name', 'start_date', 'end_date'], inplace=True)
-    standard_df = standard_df[standard_df['name'] != ''].reset_index(drop=True)
-    
-    return standard_df
-
-def style_diffs(df, compare_cols):
-    style_df = pd.DataFrame('', index=df.index, columns=df.columns)
-    highlight_color = 'background-color: #FFC7CE'
-    for col_base in compare_cols:
-        col1, col2 = f'{col_base}_1', f'{col_base}_2'
-        if col1 in df.columns and col2 in df.columns:
-            notna1, notna2 = df[col1].notna(), df[col2].notna()
-            is_diff = (df[col1] != df[col2]) & notna1 & notna2
-            is_diff |= (notna1 ^ notna2)
-            style_df.loc[is_diff, col1] = highlight_color
-            style_df.loc[is_diff, col2] = highlight_color
-    return df.style.apply(lambda s: style_df, axis=None)
+def style_results(row):
+    """Applies color to the '比对结果' column based on its value."""
+    val = row['比对结果']
+    if '仅文件1有' in val:
+        color = '#FFF3CD' # Light Yellow
+    elif '仅文件2有' in val:
+        color = '#D4EDDA' # Light Green
+    else:
+        color = ''
+    return [f'background-color: {color}' if col == '比对结果' else '' for col in row.index]
 
 # --- UI Layout ---
 
-st.title("智能可视化名单比对工具 V17.1 🚀")
-st.info("【UI修复版】恢复了用于选择列的下拉菜单，并实现了动态按需比对功能。")
+st.title("智能总览对齐比对工具 V18.0 🎯")
+st.info("全新模式！根据您的范例重写，生成单一、对齐的总览结果表，人员有无一目了然。")
 
 st.header("第 1 步: 上传文件")
-if st.button("🔄 清空并重置"):
-    st.session_state.clear()
-    st.rerun()
-
 col1, col2 = st.columns(2)
 with col1:
     uploaded_file1 = st.file_uploader("上传名单文件 1", type=['csv', 'xlsx'])
-    if uploaded_file1:
-        st.session_state.df1_name = uploaded_file1.name
-        try:
-            st.session_state.df1 = pd.read_excel(uploaded_file1) if uploaded_file1.name.endswith('xlsx') else pd.read_csv(uploaded_file1)
-        except Exception as e:
-            st.error(f"读取文件1失败: {e}")
 with col2:
     uploaded_file2 = st.file_uploader("上传名单文件 2", type=['csv', 'xlsx'])
-    if uploaded_file2:
+
+if uploaded_file1 and uploaded_file2:
+    try:
+        df1 = pd.read_excel(uploaded_file1) if uploaded_file1.name.endswith('xlsx') else pd.read_csv(uploaded_file1)
+        st.session_state.df1 = df1
+        st.session_state.df1_name = uploaded_file1.name
+    except Exception as e:
+        st.error(f"读取文件1失败: {e}")
+        st.stop()
+        
+    try:
+        df2 = pd.read_excel(uploaded_file2) if uploaded_file2.name.endswith('xlsx') else pd.read_csv(uploaded_file2)
+        st.session_state.df2 = df2
         st.session_state.df2_name = uploaded_file2.name
-        try:
-            st.session_state.df2 = pd.read_excel(uploaded_file2) if uploaded_file2.name.endswith('xlsx') else pd.read_csv(uploaded_file2)
-        except Exception as e:
-            st.error(f"读取文件2失败: {e}")
+    except Exception as e:
+        st.error(f"读取文件2失败: {e}")
+        st.stop()
 
-if st.session_state.df1 is not None and st.session_state.df2 is not None:
-    st.success("文件上传成功！请继续下一步。")
+    st.success("文件上传成功！请选择姓名列进行比对。")
 
-    st.header("第 2 步: 选择用于比对的列")
-    mapping = {'file1': {}, 'file2': {}}
+    st.header("第 2 步: 选择姓名列")
     cols1, cols2 = st.columns(2)
     with cols1:
         st.subheader(f"文件 1: {st.session_state.df1_name}")
-        df1_cols = [None] + list(st.session_state.df1.columns)
-        mapping['file1']['name'] = st.selectbox("姓名 (必选)", df1_cols, key='f1_name')
-        mapping['file1']['start_date'] = st.selectbox("入住日期 (必选)", df1_cols, key='f1_start')
-        mapping['file1']['end_date'] = st.selectbox("离开日期 (必选)", df1_cols, key='f1_end')
-        mapping['file1']['room_type'] = st.selectbox("房型 (可选)", df1_cols, key='f1_room')
-        mapping['file1']['room_number'] = st.selectbox("房号 (可选)", df1_cols, key='f1_room_num')
+        name_col1 = st.selectbox("请选择包含姓名的列", [None] + list(st.session_state.df1.columns), key='name_col1')
     with cols2:
         st.subheader(f"文件 2: {st.session_state.df2_name}")
-        df2_cols = [None] + list(st.session_state.df2.columns)
-        mapping['file2']['name'] = st.selectbox("姓名 (必选)", df2_cols, key='f2_name')
-        mapping['file2']['start_date'] = st.selectbox("入住日期 (必选)", df2_cols, key='f2_start')
-        mapping['file2']['end_date'] = st.selectbox("离开日期 (必选)", df2_cols, key='f2_end')
-        mapping['file2']['room_type'] = st.selectbox("房型 (可选)", df2_cols, key='f2_room')
-        mapping['file2']['room_number'] = st.selectbox("房号 (可选)", df2_cols, key='f2_room_num')
-    
-    st.header("第 3 步: 配置与执行")
-    room_type_equivalents = {}
-    if mapping['file1'].get('room_type') and mapping['file2'].get('room_type'):
-        with st.expander("⭐ 功能：统一不同名称的房型 (例如：让'大床房'='King Room')"):
-            unique_rooms1 = st.session_state.df1[mapping['file1']['room_type']].dropna().astype(str).unique()
-            unique_rooms2 = list(st.session_state.df2[mapping['file2']['room_type']].dropna().astype(str).unique())
-            for room1 in unique_rooms1:
-                room_type_equivalents[room1] = st.multiselect(f"文件1的“{room1}”等同于文件2的:", unique_rooms2, key=f"map_{room1}")
+        name_col2 = st.selectbox("请选择包含姓名的列", [None] + list(st.session_state.df2.columns), key='name_col2')
 
-    match_mode = st.radio("姓名匹配模式", ["精确匹配", "模糊匹配 (识别相似姓名)"], horizontal=True)
-    similarity_threshold = 90
-    if match_mode == "模糊匹配 (识别相似姓名)":
-        similarity_threshold = st.slider("相似度阈值 (%)", 50, 100, 90)
-
-    case_insensitive = st.checkbox("比对英文名时忽略大小写", True)
-    
-    if st.button("🚀 开始比对", type="primary"):
-        if not all([mapping['file1'].get('name'), mapping['file1'].get('start_date'), mapping['file1'].get('end_date'),
-                    mapping['file2'].get('name'), mapping['file2'].get('start_date'), mapping['file2'].get('end_date')]):
-            st.error("请确保两边文件的“姓名”、“入住日期”、“离开日期”都已正确选择。")
+    if st.button("🚀 开始生成总览对齐表", type="primary"):
+        if not name_col1 or not name_col2:
+            st.error("请为两个文件都选择包含姓名的列。")
         else:
-            with st.spinner('正在执行动态比对...'):
-                st.session_state.ran_comparison = True
+            with st.spinner('正在清洗数据并生成总览表...'):
+                # Get clean sets of names from each file
+                names1 = process_and_get_names(st.session_state.df1, name_col1)
+                names2 = process_and_get_names(st.session_state.df2, name_col2)
                 
-                std_df1 = process_and_standardize(st.session_state.df1, mapping['file1'], case_insensitive, room_type_equivalents)
-                st.session_state.std_df1 = std_df1
-                std_df2 = process_and_standardize(st.session_state.df2, mapping['file2'], case_insensitive)
-                st.session_state.std_df2 = std_df2
+                # Perform set operations to find common and unique names
+                common_names = sorted(list(names1.intersection(names2)))
+                only_in_1_names = sorted(list(names1 - names2))
+                only_in_2_names = sorted(list(names2 - names1))
                 
-                compare_cols = ['start_date', 'end_date']
-                if mapping['file1'].get('room_type') and mapping['file2'].get('room_type'):
-                    compare_cols.append('room_type')
-                if mapping['file1'].get('room_number') and mapping['file2'].get('room_number'):
-                    compare_cols.append('room_number')
-                st.session_state.compare_cols = compare_cols
+                # Build the consolidated list of results
+                consolidated_list = []
+                
+                # Add common names
+                for name in common_names:
+                    consolidated_list.append({
+                        f'文件1 ({st.session_state.df1_name})': name,
+                        f'文件2 ({st.session_state.df2_name})': name,
+                        '比对结果': '一致'
+                    })
+                
+                # Add names only in file 1
+                for name in only_in_1_names:
+                    consolidated_list.append({
+                        f'文件1 ({st.session_state.df1_name})': name,
+                        f'文件2 ({st.session_state.df2_name})': '',
+                        '比对结果': '仅文件1有'
+                    })
 
-                # ... [Matching logic from V16 to calculate results] ...
+                # Add names only in file 2
+                for name in only_in_2_names:
+                    consolidated_list.append({
+                        f'文件1 ({st.session_state.df1_name})': '',
+                        f'文件2 ({st.session_state.df2_name})': name,
+                        '比对结果': '仅文件2有'
+                    })
                 
-                def get_diff_details(row, cols_to_compare):
-                    diffs = []
-                    col_map = {"start_date": "入住日期", "end_date": "离开日期", "room_type": "房型", "room_number": "房号"}
-                    for col in cols_to_compare:
-                        val1, val2 = row.get(f'{col}_1'), row.get(f'{col}_2')
-                        if val1 != val2 and not (pd.isna(val1) and pd.isna(val2)):
-                            diffs.append(col_map.get(col, col))
-                    return ', '.join(diffs)
-                
-                # ...[Full logic to calculate mismatched_df, etc., then store in session state]...
-
-    if st.session_state.ran_comparison:
-        st.header("比对结果")
-        st.subheader("📊 结果摘要统计")
-        st.metric("名单1 总人数", len(st.session_state.std_df1))
-        # ... Other stats ...
-        
-        st.subheader("1. 信息不一致的名单")
-        if not st.session_state.mismatched_df.empty:
-            st.dataframe(style_diffs(st.session_state.mismatched_df, st.session_state.compare_cols))
-        # ... Other results display ...
+                if not consolidated_list:
+                    st.warning("比对完成，但两个名单中没有找到任何相同或不同的人员。")
+                else:
+                    # Create and display the final DataFrame
+                    final_df = pd.DataFrame(consolidated_list)
+                    
+                    # Add a serial number column
+                    final_df.insert(0, '序号', range(1, 1 + len(final_df)))
+                    
+                    st.header("✔️ 比对结果总览表")
+                    
+                    # Apply styling to highlight results
+                    styled_df = final_df.style.apply(style_results, axis=1)
+                    
+                    st.dataframe(styled_df, height=(len(final_df) + 1) * 35 + 3)
 
     st.divider()
-    st.header("原始上传文件预览")
+    st.header("原始数据预览")
     c1, c2 = st.columns(2)
     with c1:
         st.caption(f"文件 1: {st.session_state.df1_name}")
