@@ -50,11 +50,30 @@ def process_and_standardize(df, mapping, case_insensitive=False, room_type_equiv
         if col_name and col_name in df.columns:
             standard_df[col_key] = df[col_name]
 
-    # 对选择的各列进行清洗和数据类型标准化。
+    # --- 智能日期统一引擎 ---
+    def robust_date_parser(series):
+        """
+        一个更强大的日期解析器，专门处理缺少年份的日期格式 (如 '09/26' 或 '09/26 18:00')。
+        """
+        def process_date(date_str):
+            if pd.isna(date_str): return pd.NaT # 返回pandas的“非时间”对象
+            date_str = str(date_str).strip()
+            # 检查是否为 '月/日' 或 '月/日 时:分' 格式
+            if re.match(r'^\d{1,2}/\d{1,2}', date_str):
+                # 只取日期部分（忽略时间）
+                date_part = date_str.split(' ')[0]
+                # 假设年份为2025年，并重新组合成标准格式
+                return f"2025-{date_part.replace('/', '-')}"
+            # 如果是其他格式，直接返回让pandas处理
+            return date_str
+        
+        # 应用自定义处理函数，然后交给pandas进行最终转换
+        return pd.to_datetime(series.apply(process_date), errors='coerce').dt.strftime('%Y-%m-%d')
+
     if 'start_date' in standard_df.columns:
-        standard_df['start_date'] = pd.to_datetime(standard_df['start_date'].astype(str).str.strip(), errors='coerce').dt.strftime('%Y-%m-%d')
+        standard_df['start_date'] = robust_date_parser(standard_df['start_date'])
     if 'end_date' in standard_df.columns:
-        standard_df['end_date'] = pd.to_datetime(standard_df['end_date'].astype(str).str.strip(), errors='coerce').dt.strftime('%Y-%m-%d')
+        standard_df['end_date'] = robust_date_parser(standard_df['end_date'])
     
     if 'room_type' in standard_df.columns:
         standard_df['room_type'] = standard_df['room_type'].astype(str).apply(forensic_clean_text)
@@ -89,8 +108,8 @@ def highlight_diff(row, col1, col2):
 
 # --- UI Layout ---
 
-st.title("多维审核比对平台 V23.1 🏆 (终极完整版)")
-st.info("全新模式：结果以独立的标签页展示，让您一次专注于一个维度的比对，清晰直观！")
+st.title("多维审核比对平台 V23.2 🏆 (终极智能日期版)")
+st.info("全新模式：结果以独立的标签页展示，并内置智能日期统一引擎，比对更精准！")
 
 st.header("第 1 步: 上传文件")
 if st.button("🔄 清空并重置"):
